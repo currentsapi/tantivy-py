@@ -3,6 +3,7 @@
 use crate::document::Document;
 use crate::query::Query;
 use crate::to_pyerr;
+use crate::schema::Field;
 use pyo3::exceptions::ValueError;
 use pyo3::prelude::*;
 use pyo3::PyObjectProtocol;
@@ -98,6 +99,50 @@ impl Searcher {
         Ok(SearchResult { hits, count })
     }
 
+    #[args(limit = 10, count = true)]
+    fn search_sorted_by_field(
+        &self,
+        py: Python,
+        query: &Query,
+        sort_by_field: &Field, 
+        limit: usize,
+        count: bool,
+    ) -> PyResult<SearchResult> {
+        let mut multicollector = MultiCollector::new();
+
+        let count_handle = if count {
+            Some(multicollector.add_collector(Count))
+        } else {
+            None
+        };
+
+        let (mut multifruit, hits) = {
+            let collector = TopDocs::with_limit(limit).order_by_u64_field(sort_by_field.inner);
+            let top_docs_handle = multicollector.add_collector(collector);
+
+            let ret = self.inner.search(&query.inner, &multicollector);
+
+            match ret {
+                Ok(mut r) => {
+                    let top_docs = top_docs_handle.extract(&mut r);
+                    let result: Vec<(PyObject, DocAddress)> = top_docs
+                        .iter()
+                        .map(|(f, d)| ((*f).into_py(py), DocAddress::from(d)))
+                        .collect();
+                    (r, result)
+                }
+                Err(e) => return Err(ValueError::py_err(e.to_string())),
+            }
+        };
+
+        let count = match count_handle {
+            Some(h) => Some(h.extract(&mut multifruit)),
+            None => None,
+        };
+
+        Ok(SearchResult { hits, count })
+    }
+
     /// Returns the overall number of documents in the index.
     #[getter]
     fn num_docs(&self) -> u64 {
@@ -135,6 +180,18 @@ pub(crate) struct DocAddress {
 
 #[pymethods]
 impl DocAddress {
+    #[new]
+    fn new(
+        obj: &PyRawObject,
+        segment_ord: u32,
+        doc: u32,
+    ) {
+        obj.init(DocAddress {
+            segment_ord: segment_ord,
+            doc: doc
+        });
+    }
+
     /// The segment ordinal is an id identifying the segment hosting the
     /// document. It is only meaningful, in the context of a searcher.
     #[getter]
